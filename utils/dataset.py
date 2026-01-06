@@ -237,15 +237,15 @@ def Dataset(cifar = False, mnist = False, fmnist = False, cinic = False, cifar10
 
 
 def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, batchSize, alpha=0.1,
-                   shard=2, drop=True, classOfLabel=10):
+                   shard=2, drop=True, classOfLabel=10, label_dirichlet=False):
     users_data = []
     if iid:
         udata_size = int(len(train_label) / user_num)
         for i in range(user_num):
-            set = TrainSet(train_img[udata_size * i:(udata_size * (i + 1))],
+            train_set = TrainSet(train_img[udata_size * i:(udata_size * (i + 1))],
                            train_label[udata_size * i:(udata_size * (i + 1))], transform)
             loader = Data.DataLoader(
-                dataset=set,
+                dataset=train_set,
                 batch_size=batchSize,
                 shuffle=True,
                 drop_last=drop
@@ -259,14 +259,88 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
             orderOfClient = np.random.permutation(local_data.shape[0])
             local_data = local_data[orderOfClient]
             local_label = local_label[orderOfClient]
-            set = TrainSet(local_data, local_label, transform)
+            train_set = TrainSet(local_data, local_label, transform)
             loader = Data.DataLoader(
-                dataset=set,
+                dataset=train_set,
                 batch_size=batchSize,
                 shuffle=True,
                 drop_last=drop
             )
             users_data.append(loader)
+    elif label_dirichlet:
+        # Hybrid mode: shard-based class restriction + Dirichlet-based quantity distribution
+        # Step 1: Assign `shard` number of classes to each client
+        all_classes = list(range(classOfLabel))
+        np.random.shuffle(all_classes)
+        
+        # Create class assignments for each client
+        client_classes = {}
+        class_pool = all_classes * ((user_num * shard) // classOfLabel + 1)  # Ensure enough classes
+        np.random.shuffle(class_pool)
+        
+        for i in range(user_num):
+            # Assign `shard` unique classes to each client
+            assigned = set()
+            while len(assigned) < shard:
+                cls = class_pool.pop(0)
+                assigned.add(cls)
+                class_pool.append(cls)  # Put back for potential reuse
+            client_classes[i] = list(assigned)
+        
+        # Step 2: For each class, distribute its data among clients that have that class using Dirichlet
+        class_to_clients = {c: [] for c in range(classOfLabel)}
+        for client_id, classes in client_classes.items():
+            for c in classes:
+                class_to_clients[c].append(client_id)
+        
+        # Initialize client data indices
+        client_indices = {i: [] for i in range(user_num)}
+        
+        for c in range(classOfLabel):
+            # Get all indices for this class
+            idx_c = np.where(np.array(train_label) == c)[0]
+            np.random.shuffle(idx_c)
+            
+            # Get clients that have this class
+            clients_with_class = class_to_clients[c]
+            if len(clients_with_class) == 0:
+                continue
+            
+            # Dirichlet distribution among clients with this class
+            proportions = np.random.dirichlet(np.repeat(alpha, len(clients_with_class)))
+            proportions = (np.cumsum(proportions) * len(idx_c)).astype(int)
+            proportions = np.insert(proportions, 0, 0)
+            
+            for i, client_id in enumerate(clients_with_class):
+                start_idx = proportions[i]
+                end_idx = proportions[i + 1] if i + 1 < len(proportions) else len(idx_c)
+                client_indices[client_id].extend(idx_c[start_idx:end_idx].tolist())
+        
+        # Step 3: Create DataLoaders for each client
+        for i in range(user_num):
+            indices = client_indices[i]
+            if len(indices) == 0:
+                # Fallback: give some random data
+                indices = np.random.choice(len(train_label), 100, replace=False).tolist()
+            
+            local_data = train_img[indices]
+            local_label = np.array(train_label)[indices]
+            orderOfClient = np.random.permutation(len(local_data))
+            local_data = local_data[orderOfClient]
+            local_label = local_label[orderOfClient]
+            train_set = TrainSet(local_data, local_label, transform)
+            loader = Data.DataLoader(
+                dataset=train_set,
+                batch_size=batchSize,
+                shuffle=True,
+                drop_last=drop
+            )
+            users_data.append(loader)
+        
+        # Print client class distribution
+        print(f"[label_dirichlet] alpha={alpha}, shard={shard}")
+        for i in range(min(5, user_num)):  # Print first 5 clients
+            print(f"  Client {i}: classes {client_classes[i]}, samples: {len(client_indices[i])}")
     else:
         # Create an array of classOfLabel to hold the index of each label's subscript.
         class_index = [[] for i in range(classOfLabel)]
@@ -304,9 +378,9 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
             orderOfClient = np.random.permutation(local_data.shape[0])
             local_data = local_data[orderOfClient]
             local_label = local_label[orderOfClient]
-            set = TrainSet(local_data, local_label, transform)
+            train_set = TrainSet(local_data, local_label, transform)
             loader = Data.DataLoader(
-                dataset=set,
+                dataset=train_set,
                 batch_size=batchSize,
                 shuffle=True,
                 drop_last=drop

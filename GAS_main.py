@@ -3,8 +3,7 @@ import os
 
 # Set up paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-utils_path = os.path.join(parent_dir, 'utils')
+utils_path = os.path.join(current_dir, 'utils')
 if utils_path not in sys.path:
     sys.path.append(utils_path)
 
@@ -19,6 +18,7 @@ from network import model_selection
 from dataset import Dataset, Data_Partition
 from utils import calculate_v_value, replace_user, sample_or_generate_features, \
     compute_local_adjustment, find_client_with_min_time
+from g_measurement import GMeasurementManager
 
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -27,14 +27,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Experimental parameter settings
 iid = False
 dirichlet = False
+label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
 shard = 2
 alpha = 0.1
-epochs = 2000
-localEpoch = 20
-user_num = 20
+epochs = 300
+localEpoch = 5
+user_num = 100
 user_parti_num = 10
-batchSize = 32
-lr = 0.01
+batchSize = 25
+lr = 0.001
 # Training data selection
 cifar = True
 mnist = False
@@ -53,10 +54,14 @@ clip_grad = True
 # Hyperparameter Setting of GAS
 Generate = True  # Whether to generate activations
 Sample_Frequency = 1  # Sampling frequency
-V_Test = False  # Calculate Gradient Dissimilarity
+V_Test = True  # Calculate Gradient Dissimilarity
 V_Test_Frequency = 1
 Accu_Test_Frequency = 1
 num_label = 100 if cifar100 else 10
+
+# G Measurement Settings (USFL-style 3-perspective)
+G_Measurement = False  # Enable 3-perspective G measurement
+G_Measure_Frequency = 1  # Diagnostic round frequency (every N epochs)
 
 # Simulate real communication environments
 WRTT = True   # True for simulation, False for no simulation
@@ -235,7 +240,7 @@ random.shuffle(train_index)
 train_img = np.array(alldata)[train_index]
 train_label = np.array(alllabel)[train_index]
 users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, batchSize, alpha, shard,
-                            drop=False, classOfLabel=num_label)
+                            drop=False, classOfLabel=num_label, label_dirichlet=label_dirichlet)
 
 # Model initialization
 user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN)
@@ -254,6 +259,19 @@ else:
 stats = IncrementalStats(device=device)
 condensed_data = {c: None for c in range(num_label)}
 train_begin_time = datetime.datetime.now()
+
+# Initialize G Measurement Manager (USFL-style 3-perspective)
+g_manager = None
+full_train_loader = None
+if G_Measurement:
+    g_manager = GMeasurementManager(device, measure_frequency=G_Measure_Frequency)
+    # Create a DataLoader for full training data (for Oracle computation with proper transforms)
+    from dataset import TrainSet
+    full_train_set = TrainSet(train_img, train_label, transform)
+    full_train_loader = dataloader.DataLoader(
+        dataset=full_train_set, batch_size=batchSize, shuffle=False, drop_last=False
+    )
+    print(f"[G Measurement] Initialized. Frequency: every {G_Measure_Frequency} epochs")
 
 # Training loop
 total_accuracy = []
@@ -451,6 +469,118 @@ while epoch != epochs:
                 print(f"Epoch {epoch + 1}, V Value: {v_value}")
                 total_v_value.append(v_value)
 
+            # G Measurement (USFL-style 3-perspective)
+            if G_Measurement and g_manager is not None and g_manager.should_measure(epoch):
+                # Compute Oracle gradients (full training data)
+                g_manager.compute_oracle(user_model, server_model, full_train_loader, criterion)
+                
+                # Backup BN stats before Current gradient computation
+                from g_measurement import backup_bn_stats, restore_bn_stats, collect_current_gradients, compute_all_g_scores
+                user_bn_backup = backup_bn_stats(user_model)
+                server_bn_backup = backup_bn_stats(server_model)
+                
+                user_model.train()
+                server_model.train()
+                
+                # ========== Client G: Compute for EACH participating client ==========
+                from g_measurement import compute_g_score
+                per_client_g = {}
+                
+                for client_idx, client_id in enumerate(order):
+                    # Load this client's model
+                    user_model.load_state_dict(usersParam[client_idx], strict=True)
+                    
+                    # Get a batch from this client's data
+                    client_images, client_labels = clients[client_id].train_one_iteration()
+                    client_images = client_images.to(device)
+                    client_labels = client_labels.to(device)
+                    
+                    # Forward pass
+                    client_split_output = user_model(client_images)
+                    client_server_output = server_model(client_split_output)
+                    client_loss = criterion(client_server_output, client_labels.long())
+                    
+                    # Backward for client gradients
+                    user_model.zero_grad()
+                    server_model.zero_grad()
+                    client_loss.backward()
+                    
+                    # Collect Client gradients
+                    current_client_grads = [p.grad.clone().cpu() if p.grad is not None else torch.zeros_like(p).cpu() 
+                                            for p in user_model.parameters()]
+                    
+                    # Compute Client G for this client (with details)
+                    g_details = compute_g_score(g_manager.oracle_grads['client'], current_client_grads, return_details=True)
+                    per_client_g[client_id] = g_details
+                    
+                    # Cleanup
+                    del client_images, client_labels, client_split_output, client_server_output, client_loss
+                    del current_client_grads
+                
+                # Print per-client G with details
+                print(f"[G Measurement] Epoch {epoch} - Per-Client G:")
+                for cid, gd in per_client_g.items():
+                    print(f"  Client {cid}: ||oracle||={gd['oracle_norm']:.4f}, ||current||={gd['current_norm']:.4f}, "
+                          f"G={gd['G']:.4f}, G_rel={gd['G_rel']:.1f}%")
+                avg_client_g = sum(gd['G'] for gd in per_client_g.values()) / len(per_client_g)
+                avg_g_rel = sum(gd['G_rel'] for gd in per_client_g.values()) / len(per_client_g)
+                print(f"  Average: G={avg_client_g:.4f}, G_rel={avg_g_rel:.1f}%")
+                
+                # Restore shared model for split/server G measurement
+                user_model.load_state_dict(userParam, strict=True)
+                
+                # ========== Split G: Use one client for split layer gradient ==========
+                client_images, client_labels = clients[order[0]].train_one_iteration()
+                client_images = client_images.to(device)
+                client_labels = client_labels.to(device)
+                client_split_output = user_model(client_images)
+                client_split_output.retain_grad()
+                client_server_output = server_model(client_split_output)
+                client_loss = criterion(client_server_output, client_labels.long())
+                user_model.zero_grad()
+                server_model.zero_grad()
+                client_loss.backward()
+                current_split_grad = client_split_output.grad.mean(dim=0).clone().cpu() if client_split_output.grad is not None else None
+                split_g = compute_g_score(g_manager.oracle_grads['split'], current_split_grad)
+                del client_images, client_labels, client_split_output, client_server_output, client_loss
+                
+                # ========== Server G: Use concat_features (server's actual input) ==========
+                user_model.zero_grad()
+                server_model.zero_grad()
+                
+                server_input = concat_features_V.clone().detach().requires_grad_(True)
+                server_output = server_model(server_input)
+                server_loss = criterion(server_output, concat_labels_V.long())
+                server_loss.backward()
+                
+                # Collect Server gradients
+                current_server_grads = [p.grad.clone().cpu() if p.grad is not None else torch.zeros_like(p).cpu() 
+                                        for p in server_model.parameters()]
+                server_g = compute_g_score(g_manager.oracle_grads['server'], current_server_grads)
+                
+                # Record G scores (average client G)
+                g_manager.g_history['client_g'].append(avg_client_g)
+                g_manager.g_history['server_g'].append(server_g)
+                g_manager.g_history['split_g'].append(split_g)
+                
+                print(f"[G Measurement] Epoch {epoch}: "
+                      f"Avg Client G = {avg_client_g:.6f}, "
+                      f"Server G = {server_g:.6f}, "
+                      f"Split G = {split_g:.6f}")
+                
+                # Restore BN stats
+                restore_bn_stats(user_model, user_bn_backup, device)
+                restore_bn_stats(server_model, server_bn_backup, device)
+                
+                # Cleanup
+                g_manager.oracle_grads = None
+                user_model.zero_grad()
+                server_model.zero_grad()
+                del server_input, server_output, server_loss
+                del user_bn_backup, server_bn_backup
+                del current_server_grads, current_split_grad, per_client_g
+                torch.cuda.empty_cache()
+
         # select new client
         index = np.where(order == selected_client)[0][0]
         usersParam[index] = userParam
@@ -512,6 +642,14 @@ with open('GAS_main.txt', 'w') as f:
         f.write('clients position = [' + clients_position_str + ']\n')
         f.write('clients rates = [' + rates_str + ']\n')
         f.write('time = [' + time_record_str + ']\n')
+
+    if G_Measurement and g_manager is not None:
+        client_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['client_g'])
+        server_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['server_g'])
+        split_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['split_g'])
+        f.write(f'Client G = [{client_g_str}]\n')
+        f.write(f'Server G = [{server_g_str}]\n')
+        f.write(f'Split G = [{split_g_str}]\n')
 
     f.write(f'{begin_time_str} ~ {end_time_str};\n')
     f.write('GAS = [' + total_accuracy_str + ']\n')
