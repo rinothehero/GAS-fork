@@ -30,6 +30,7 @@ dirichlet = False
 label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
 shard = 2
 alpha = 0.1
+min_require_size = 10  # Minimum samples per client for data partitioning
 epochs = 300
 localEpoch = 5
 user_num = 100
@@ -56,7 +57,7 @@ clip_grad = True
 # Hyperparameter Setting of GAS
 Generate = True  # Whether to generate activations
 Sample_Frequency = 1  # Sampling frequency
-V_Test = True  # Calculate Gradient Dissimilarity
+V_Test = False  # Calculate Gradient Dissimilarity
 V_Test_Frequency = 1
 Accu_Test_Frequency = 1
 num_label = 100 if cifar100 else 10
@@ -242,7 +243,8 @@ random.shuffle(train_index)
 train_img = np.array(alldata)[train_index]
 train_label = np.array(alllabel)[train_index]
 users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, batchSize, alpha, shard,
-                            drop=False, classOfLabel=num_label, label_dirichlet=label_dirichlet)
+                            drop=False, classOfLabel=num_label, label_dirichlet=label_dirichlet,
+                            min_require_size=min_require_size)
 
 # Model initialization
 user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet)

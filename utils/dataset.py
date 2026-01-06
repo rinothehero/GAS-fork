@@ -237,7 +237,7 @@ def Dataset(cifar = False, mnist = False, fmnist = False, cinic = False, cifar10
 
 
 def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, batchSize, alpha=0.1,
-                   shard=2, drop=True, classOfLabel=10, label_dirichlet=False):
+                   shard=2, drop=True, classOfLabel=10, label_dirichlet=False, min_require_size=10):
     users_data = []
     if iid:
         udata_size = int(len(train_label) / user_num)
