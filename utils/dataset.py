@@ -251,6 +251,24 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
                 drop_last=drop
             )
             users_data.append(loader)
+    elif dirichlet and shard > 0:
+        # Shard + Dirichlet: Each client gets exactly 'shard' classes with Dirichlet distribution
+        print(f"Using Shard + Dirichlet mode: each client gets {shard} classes with alpha={alpha}")
+        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=10)
+        for i in range(user_num):
+            local_data = train_img[indexOfClients[i]]
+            local_label = train_label[indexOfClients[i]]
+            orderOfClient = np.random.permutation(local_data.shape[0])
+            local_data = local_data[orderOfClient]
+            local_label = local_label[orderOfClient]
+            set = TrainSet(local_data, local_label, transform)
+            loader = Data.DataLoader(
+                dataset=set,
+                batch_size=batchSize,
+                shuffle=True,
+                drop_last=drop
+            )
+            users_data.append(loader)
     elif dirichlet:
         indexOfClients = Dirichlet(train_label, user_num, classOfLabel, alpha, min_require_size=10)
         for i in range(user_num):
@@ -269,63 +287,13 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
             users_data.append(loader)
     elif label_dirichlet:
         # Hybrid mode: shard-based class restriction + Dirichlet-based quantity distribution
-        # Step 1: Assign `shard` number of classes to each client
-        all_classes = list(range(classOfLabel))
-        np.random.shuffle(all_classes)
-        
-        # Create class assignments for each client
-        client_classes = {}
-        class_pool = all_classes * ((user_num * shard) // classOfLabel + 1)  # Ensure enough classes
-        np.random.shuffle(class_pool)
-        
+        # Use the robust Shard_Dirichlet function
+        print(f"[label_dirichlet] Using Shard_Dirichlet: each client gets {shard} classes with alpha={alpha}")
+        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=10)
         for i in range(user_num):
-            # Assign `shard` unique classes to each client
-            assigned = set()
-            while len(assigned) < shard:
-                cls = class_pool.pop(0)
-                assigned.add(cls)
-                class_pool.append(cls)  # Put back for potential reuse
-            client_classes[i] = list(assigned)
-        
-        # Step 2: For each class, distribute its data among clients that have that class using Dirichlet
-        class_to_clients = {c: [] for c in range(classOfLabel)}
-        for client_id, classes in client_classes.items():
-            for c in classes:
-                class_to_clients[c].append(client_id)
-        
-        # Initialize client data indices
-        client_indices = {i: [] for i in range(user_num)}
-        
-        for c in range(classOfLabel):
-            # Get all indices for this class
-            idx_c = np.where(np.array(train_label) == c)[0]
-            np.random.shuffle(idx_c)
-            
-            # Get clients that have this class
-            clients_with_class = class_to_clients[c]
-            if len(clients_with_class) == 0:
-                continue
-            
-            # Dirichlet distribution among clients with this class
-            proportions = np.random.dirichlet(np.repeat(alpha, len(clients_with_class)))
-            proportions = (np.cumsum(proportions) * len(idx_c)).astype(int)
-            proportions = np.insert(proportions, 0, 0)
-            
-            for i, client_id in enumerate(clients_with_class):
-                start_idx = proportions[i]
-                end_idx = proportions[i + 1] if i + 1 < len(proportions) else len(idx_c)
-                client_indices[client_id].extend(idx_c[start_idx:end_idx].tolist())
-        
-        # Step 3: Create DataLoaders for each client
-        for i in range(user_num):
-            indices = client_indices[i]
-            if len(indices) == 0:
-                # Fallback: give some random data
-                indices = np.random.choice(len(train_label), 100, replace=False).tolist()
-            
-            local_data = train_img[indices]
-            local_label = np.array(train_label)[indices]
-            orderOfClient = np.random.permutation(len(local_data))
+            local_data = train_img[indexOfClients[i]]
+            local_label = train_label[indexOfClients[i]]
+            orderOfClient = np.random.permutation(local_data.shape[0])
             local_data = local_data[orderOfClient]
             local_label = local_label[orderOfClient]
             train_set = TrainSet(local_data, local_label, transform)
@@ -336,11 +304,6 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
                 drop_last=drop
             )
             users_data.append(loader)
-        
-        # Print client class distribution
-        print(f"[label_dirichlet] alpha={alpha}, shard={shard}")
-        for i in range(min(5, user_num)):  # Print first 5 clients
-            print(f"  Client {i}: classes {client_classes[i]}, samples: {len(client_indices[i])}")
     else:
         # Create an array of classOfLabel to hold the index of each label's subscript.
         class_index = [[] for i in range(classOfLabel)]
@@ -414,6 +377,88 @@ def Dirichlet(y_train, n_parties, K=10, alpha=0.1, min_require_size = 10):
     for j in range(n_parties):
         np.random.shuffle(idx_batch[j])
         party2dataidx[j] = idx_batch[j]
+    return party2dataidx
+
+
+def Shard_Dirichlet(y_train, n_parties, K=10, alpha=0.1, shard=2, min_require_size=10):
+    '''
+    Hybrid approach: Each client gets exactly 'shard' number of classes,
+    and within those classes, data is distributed according to Dirichlet distribution.
+
+    K: Number of categories
+    n_parties: number of users
+    alpha: Dirichlet concentration parameter
+    shard: number of classes per client
+    min_require_size: Make sure the user has data, at least min_require_size data.
+    '''
+    min_size = 0
+    party2dataidx = {}
+
+    while min_size < min_require_size:
+        idx_batch = [[] for _ in range(n_parties)]
+
+        # Step 1: Assign exactly 'shard' classes to each client
+        # Create a mapping: client -> list of assigned classes
+        client2classes = {}
+
+        # Calculate how many times each class should be assigned
+        total_assignments = n_parties * shard
+        if total_assignments % K == 0:
+            assignments_per_class = total_assignments // K
+        else:
+            # If not evenly divisible, some classes will appear more
+            assignments_per_class = (total_assignments // K) + 1
+
+        # Create a pool of class assignments
+        class_pool = []
+        for k in range(K):
+            class_pool.extend([k] * assignments_per_class)
+        np.random.shuffle(class_pool)
+
+        # Assign classes to clients
+        for i in range(n_parties):
+            client2classes[i] = class_pool[i * shard : (i + 1) * shard]
+
+        # Print class assignments for verification
+        print(f"Class assignments: {client2classes}")
+
+        # Step 2: For each class, distribute its data among clients that have this class
+        # using Dirichlet distribution
+        for k in range(K):
+            idx_k = np.where(y_train == k)[0]
+            np.random.shuffle(idx_k)
+
+            # Find which clients have this class
+            clients_with_class_k = [i for i in range(n_parties) if k in client2classes[i]]
+
+            if len(clients_with_class_k) == 0:
+                continue
+
+            # Distribute data of class k among these clients using Dirichlet
+            proportions = np.random.dirichlet(np.repeat(alpha, len(clients_with_class_k)))
+            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+            idx_splits = np.split(idx_k, proportions)
+
+            # Assign splits to the corresponding clients
+            for client_idx, data_idx in zip(clients_with_class_k, idx_splits):
+                idx_batch[client_idx].extend(data_idx.tolist())
+
+        # Check minimum size
+        min_size = min([len(idx_j) for idx_j in idx_batch])
+
+        if min_size < min_require_size:
+            print(f"Regenerating: min_size={min_size} < {min_require_size}")
+
+    # Shuffle and return
+    for j in range(n_parties):
+        np.random.shuffle(idx_batch[j])
+        party2dataidx[j] = idx_batch[j]
+
+    # Print statistics
+    for j in range(n_parties):
+        labels_in_client = np.unique(y_train[party2dataidx[j]])
+        print(f"Client {j}: {len(party2dataidx[j])} samples, classes: {labels_in_client}")
+
     return party2dataidx
 
 

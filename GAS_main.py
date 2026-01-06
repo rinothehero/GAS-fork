@@ -43,6 +43,8 @@ fmnist = False
 cinic = False
 cifar100 = False
 SVHN = False
+# Model selection
+use_resnet = True  # Set to True to use ResNet-18 instead of AlexNet
 # Random seeds selection
 seed_value = 2023
 torch.manual_seed(seed_value)
@@ -243,7 +245,7 @@ users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, u
                             drop=False, classOfLabel=num_label, label_dirichlet=label_dirichlet)
 
 # Model initialization
-user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN)
+user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet)
 user_model.to(device)
 server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
