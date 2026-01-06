@@ -21,7 +21,7 @@ from utils import calculate_v_value, replace_user, sample_or_generate_features, 
 from g_measurement import GMeasurementManager
 
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Experimental parameter settings
@@ -29,14 +29,16 @@ iid = False
 dirichlet = False
 label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
 shard = 2
-alpha = 0.1
-min_require_size = 10  # Minimum samples per client for data partitioning
+alpha = 0.3
+min_require_size = 10 # Minimum samples per client for data partitioning
 epochs = 300
 localEpoch = 5
 user_num = 100
 user_parti_num = 10
 batchSize = 25
 lr = 0.001
+momentum = 0.0
+weight_decay = 0.0 #0.0005
 # Training data selection
 cifar = True
 mnist = False
@@ -57,14 +59,14 @@ clip_grad = True
 # Hyperparameter Setting of GAS
 Generate = True  # Whether to generate activations
 Sample_Frequency = 1  # Sampling frequency
-V_Test = False  # Calculate Gradient Dissimilarity
+V_Test = True  # Calculate Gradient Dissimilarity
 V_Test_Frequency = 1
 Accu_Test_Frequency = 1
 num_label = 100 if cifar100 else 10
 
 # G Measurement Settings (USFL-style 3-perspective)
-G_Measurement = False  # Enable 3-perspective G measurement
-G_Measure_Frequency = 1  # Diagnostic round frequency (every N epochs)
+G_Measurement = True  # Enable 3-perspective G measurement
+G_Measure_Frequency = 10  # Diagnostic round frequency (every N epochs)
 
 # Simulate real communication environments
 WRTT = True   # True for simulation, False for no simulation
@@ -169,58 +171,55 @@ class Client:
 
 # IncrementalStats class for maintaining mean and variance
 class IncrementalStats:
-    def __init__(self, device):
+    def __init__(self, device, diagonal=False):
         self.device = device
+        self.diagonal = diagonal  # True for ResNet (memory efficient), False for AlexNet
         self.means = {}
         self.variances = {}
         self.weight = {}
         self.counts = {}
 
-    def update(self, new_mean, new_cov, new_weight, label):
+    def update(self, new_mean, new_var_or_cov, new_weight, label):
         """
-        Update the weighted mean and variance of the features for the given label.
-        :param feature: Feature vector of type torch.Tensor
+        Update the weighted mean and variance/covariance of the features for the given label.
+        :param new_mean: Mean vector of type torch.Tensor
+        :param new_var_or_cov: Variance vector (diagonal) or Covariance matrix depending on self.diagonal
+        :param new_weight: Weight for this update
         :param label: Label
         """
-        n = new_mean.shape[0]
         regularization_term = 1e-5
-        I = torch.eye(n).to(self.device)
 
         if label not in self.means:
             self.means[label] = new_mean.to(self.device)
-            self.variances[label] = new_cov.to(self.device)
+            self.variances[label] = new_var_or_cov.to(self.device)
             self.counts[label] = 1
             self.weight[label] = new_weight
         else:
             old_mean = self.means[label]
-            old_cov = self.variances[label]
+            old_var = self.variances[label]
             old_weight = self.weight[label]
             self.weight[label] = old_weight + new_weight
             decay_factor = old_weight / self.weight[label]
 
+            # Update mean
             self.means[label] = decay_factor * old_mean + (1 - decay_factor) * new_mean
-            self.variances[label] = decay_factor * (
-                    old_cov + torch.outer(self.means[label] - old_mean, self.means[label] - old_mean)) \
-                                    + (1 - decay_factor) * (new_cov + torch.outer(self.means[label] - new_mean,
-                                                                                  self.means[
-                                                                                      label] - new_mean)) + regularization_term * I
+            
+            if self.diagonal:
+                # Diagonal variance (for ResNet - memory efficient)
+                self.variances[label] = decay_factor * (
+                        old_var + (self.means[label] - old_mean) ** 2
+                ) + (1 - decay_factor) * (
+                        new_var_or_cov + (self.means[label] - new_mean) ** 2
+                ) + regularization_term
+            else:
+                # Full covariance matrix (for AlexNet - more accurate)
+                n = new_mean.shape[0]
+                I = torch.eye(n).to(self.device)
+                self.variances[label] = decay_factor * (
+                        old_var + torch.outer(self.means[label] - old_mean, self.means[label] - old_mean)) \
+                                        + (1 - decay_factor) * (new_var_or_cov + torch.outer(self.means[label] - new_mean,
+                                                                                      self.means[label] - new_mean)) + regularization_term * I
             self.counts[label] += 1
-
-            ''' If the activation size is large and the covariance matrix of the activation values
-                occupies a significant amount of memory, approximate the covariance matrix using a diagonal matrix.'''
-            # old_mean = self.means[label]
-            # old_var = self.variances[label]
-            # old_weight = self.weight[label]
-            # new_var = new_cov
-            # self.weight[label] = old_weight + new_weight
-            # decay_factor = old_weight / self.weight[label]
-            # self.means[label] = decay_factor * old_mean + (1 - decay_factor) * new_mean
-            # self.variances[label] = decay_factor * (
-            #         old_var + (self.means[label] - old_mean) ** 2
-            # ) + (1 - decay_factor) * (
-            #                                 new_var + (self.means[label] - new_mean) ** 2
-            #                         ) + regularization_term
-            # self.counts[label] += 1
 
 
     def get_stats(self, label):
@@ -251,8 +250,8 @@ user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, sp
 user_model.to(device)
 server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
-optimizer_down = torch.optim.SGD(user_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
-optimizer_up = torch.optim.SGD(server_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+optimizer_down = torch.optim.SGD(user_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
+optimizer_up = torch.optim.SGD(server_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
 criterion = nn.CrossEntropyLoss()
 
 # Initialize clients
@@ -260,7 +259,7 @@ if WRTT is True:
     clients = [Client(users_data[i], localEpoch, batchSize, clients_computing[i], rates[i], 0) for i in range(user_num)]
 else:
     clients = [Client(users_data[i], localEpoch) for i in range(user_num)]
-stats = IncrementalStats(device=device)
+stats = IncrementalStats(device=device, diagonal=use_resnet)  # ResNet uses diagonal, AlexNet uses full covariance
 condensed_data = {c: None for c in range(num_label)}
 train_begin_time = datetime.datetime.now()
 
@@ -368,7 +367,7 @@ while epoch != epochs:
             weights_of_label = concat_weight_counts[mask].float()
             label_weights[label.item()] = weights_of_label.sum().item()
 
-        # Calculate mean and variance
+        # Calculate mean and variance/covariance
         flatten_features = concat_features.flatten(start_dim=1)
         for label in unique_labels:
             mask = (concat_labels == label)
@@ -377,13 +376,15 @@ while epoch != epochs:
             total_weight = weights_of_label.sum()
             mean_feature = torch.sum(features_of_label * weights_of_label[:, None], dim=0) / total_weight
             centered_features = features_of_label - mean_feature
-            cov_matrix = torch.matmul((centered_features * weights_of_label[:, None]).T,
-                                      centered_features) / total_weight
-            stats.update(mean_feature, cov_matrix, label_weights[label.item()], label.item())
-            ''' If the activation size is large and the covariance matrix of the activation values
-                occupies a significant amount of memory, approximate the covariance matrix using a diagonal matrix.'''
-            # var_vector = torch.sum((centered_features ** 2) * weights_of_label[:, None], dim=0) / total_weight
-            # stats.update(mean_feature, var_vector, label_weights[label.item()], label.item())
+            
+            if use_resnet:
+                # Diagonal variance for ResNet (memory efficient)
+                var_vector = torch.sum((centered_features ** 2) * weights_of_label[:, None], dim=0) / total_weight
+                stats.update(mean_feature, var_vector, label_weights[label.item()], label.item())
+            else:
+                # Full covariance matrix for AlexNet (more accurate)
+                cov_matrix = torch.matmul((centered_features * weights_of_label[:, None]).T, centered_features) / total_weight
+                stats.update(mean_feature, cov_matrix, label_weights[label.item()], label.item())
         if Generate is True:
             # Activations generation
             if local_epoch % Sample_Frequency == 0:
@@ -396,7 +397,7 @@ while epoch != epochs:
                 if all_labels_have_stats:
                     concat_features, concat_labels = sample_or_generate_features(concat_features, concat_labels,
                                                                                  batchSize, num_label, feature_shape,
-                                                                                 device, stats)
+                                                                                 device, stats, diagonal=use_resnet)
 
         # server-side model update
         for param in server_model.parameters():

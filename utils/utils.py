@@ -78,7 +78,13 @@ def replace_user(order, k, user_num):
     return order
 
 
-def sample_or_generate_features(concat_features, concat_labels, batchsize, num_labels, original_shape, device, stats):
+def sample_or_generate_features(concat_features, concat_labels, batchsize, num_labels, original_shape, device, stats, diagonal=True):
+    """
+    Sample or generate features.
+    Args:
+        diagonal: If True (ResNet), use torch.normal with diagonal variance.
+                  If False (AlexNet), use MultivariateNormal with full covariance.
+    """
     new_features_list = []
     new_labels_list = []
     for label in range(num_labels):
@@ -90,41 +96,37 @@ def sample_or_generate_features(concat_features, concat_labels, batchsize, num_l
         variance = variance.to(device)
 
         if label_features.size(0) > 0:
-            if label_features.size(0) > batchsize:
-                sampled_features = label_features
-            else:  # If the activations are insufficient, calculate the amount of activations needed and generate
+            if label_features.size(0) >= batchsize:
+                sampled_features = label_features[:batchsize]
+            else:  # If the activations are insufficient, generate more
                 samples_needed = batchsize - label_features.size(0)
-                mvn = try_multivariate_normal(mean, variance, device)
-                generated_features = mvn.sample((samples_needed,)).to(device)
+                if diagonal:
+                    # Diagonal variance (ResNet)
+                    std = torch.sqrt(variance + 1e-5)
+                    mean_expanded = mean.unsqueeze(0).expand(samples_needed, -1)
+                    std_expanded = std.unsqueeze(0).expand(samples_needed, -1)
+                    generated_features = torch.normal(mean=mean_expanded, std=std_expanded).to(device)
+                else:
+                    # Full covariance (AlexNet)
+                    mvn = try_multivariate_normal(mean, variance, device)
+                    generated_features = mvn.sample((samples_needed,)).to(device)
                 # Restore the sampled features back to original dimensions
                 restored_features = generated_features.reshape(samples_needed, *original_shape)
                 sampled_features = torch.cat([label_features, restored_features], dim=0)
         else:
             # If the current label does not exist in concat_features, directly generate the activations.
             samples_needed = batchsize
-            mvn = try_multivariate_normal(mean, variance, device)
-            generated_features = mvn.sample((samples_needed,)).to(device)
+            if diagonal:
+                # Diagonal variance (ResNet)
+                std = torch.sqrt(variance + 1e-5)
+                mean_expanded = mean.unsqueeze(0).expand(samples_needed, -1)
+                std_expanded = std.unsqueeze(0).expand(samples_needed, -1)
+                generated_features = torch.normal(mean=mean_expanded, std=std_expanded).to(device)
+            else:
+                # Full covariance (AlexNet)
+                mvn = try_multivariate_normal(mean, variance, device)
+                generated_features = mvn.sample((samples_needed,)).to(device)
             sampled_features = generated_features.reshape(samples_needed, *original_shape)
-
-        ''' If the activation size is large and the covariance matrix of the activation values
-            occupies a significant amount of memory, approximate the covariance matrix using a diagonal matrix.'''
-        # std = torch.sqrt(variance + 1e-5)
-        # if label_features.size(0) > 0:
-        #     if label_features.size(0) >= batchsize:
-        #         sampled_features = label_features[:batchsize]
-        #     else:
-        #         samples_needed = batchsize - label_features.size(0)
-        #         mean_expanded = mean.unsqueeze(0).expand(samples_needed, -1)
-        #         std_expanded = std.unsqueeze(0).expand(samples_needed, -1)
-        #         generated_features = torch.normal(mean=mean_expanded, std=std_expanded).to(device)
-        #         restored_features = generated_features.reshape(samples_needed, *original_shape)
-        #         sampled_features = torch.cat([label_features, restored_features], dim=0)
-        # else:
-        #     samples_needed = batchsize
-        #     mean_expanded = mean.unsqueeze(0).expand(samples_needed, -1)
-        #     std_expanded = std.unsqueeze(0).expand(samples_needed, -1)
-        #     generated_features = torch.normal(mean=mean_expanded, std=std_expanded).to(device)
-        #     sampled_features = generated_features.reshape(samples_needed, *original_shape)
 
         new_features_list.append(sampled_features)
         new_labels_list.append(torch.full((sampled_features.size(0),), fill_value=label, dtype=concat_labels.dtype))

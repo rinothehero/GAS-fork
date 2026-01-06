@@ -254,7 +254,7 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
     elif dirichlet and shard > 0:
         # Shard + Dirichlet: Each client gets exactly 'shard' classes with Dirichlet distribution
         print(f"Using Shard + Dirichlet mode: each client gets {shard} classes with alpha={alpha}")
-        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=10)
+        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=min_require_size)
         for i in range(user_num):
             local_data = train_img[indexOfClients[i]]
             local_label = train_label[indexOfClients[i]]
@@ -289,7 +289,7 @@ def Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, 
         # Hybrid mode: shard-based class restriction + Dirichlet-based quantity distribution
         # Use the robust Shard_Dirichlet function
         print(f"[label_dirichlet] Using Shard_Dirichlet: each client gets {shard} classes with alpha={alpha}")
-        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=10)
+        indexOfClients = Shard_Dirichlet(train_label, user_num, classOfLabel, alpha, shard, min_require_size=min_require_size)
         for i in range(user_num):
             local_data = train_img[indexOfClients[i]]
             local_label = train_label[indexOfClients[i]]
@@ -391,7 +391,7 @@ def Shard_Dirichlet(y_train, n_parties, K=10, alpha=0.1, shard=2, min_require_si
     shard: number of classes per client
     min_require_size: Make sure the user has data, at least min_require_size data.
     '''
-    min_size = 0
+    min_size = -1  # Initialize to -1 to ensure loop runs at least once
     party2dataidx = {}
 
     while min_size < min_require_size:
@@ -419,9 +419,6 @@ def Shard_Dirichlet(y_train, n_parties, K=10, alpha=0.1, shard=2, min_require_si
         for i in range(n_parties):
             client2classes[i] = class_pool[i * shard : (i + 1) * shard]
 
-        # Print class assignments for verification
-        print(f"Class assignments: {client2classes}")
-
         # Step 2: For each class, distribute its data among clients that have this class
         # using Dirichlet distribution
         for k in range(K):
@@ -446,18 +443,16 @@ def Shard_Dirichlet(y_train, n_parties, K=10, alpha=0.1, shard=2, min_require_si
         # Check minimum size
         min_size = min([len(idx_j) for idx_j in idx_batch])
 
-        if min_size < min_require_size:
-            print(f"Regenerating: min_size={min_size} < {min_require_size}")
-
     # Shuffle and return
     for j in range(n_parties):
         np.random.shuffle(idx_batch[j])
         party2dataidx[j] = idx_batch[j]
 
-    # Print statistics
+    # Print final statistics
+    print(f"[Shard_Dirichlet] Completed: {n_parties} clients, {shard} classes/client, alpha={alpha}")
     for j in range(n_parties):
         labels_in_client = np.unique(y_train[party2dataidx[j]])
-        print(f"Client {j}: {len(party2dataidx[j])} samples, classes: {labels_in_client}")
+        print(f"  Client {j}: {len(party2dataidx[j])} samples, classes: {labels_in_client}")
 
     return party2dataidx
 
