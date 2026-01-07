@@ -152,10 +152,10 @@ def Dataset(cifar = False, mnist = False, fmnist = False, cinic = False, cifar10
             transforms.Normalize((0.286,), (0.3205,))
         ])
         train_set = torchvision.datasets.FashionMNIST(
-            root=r'../data', train=True, transform=transform, download=False)
+            root=r'../data', train=True, transform=transform, download=True)
 
         test_set = torchvision.datasets.FashionMNIST(
-            root=r'../data', train=False, transform=transform)
+            root=r'../data', train=False, transform=transform, download=True)
         train_img = train_set.data
         train_label = train_set.targets
     elif cinic == True:

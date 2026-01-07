@@ -26,30 +26,30 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Experimental parameter settings
 iid = False
-dirichlet = False
-label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
+dirichlet = True
+label_dirichlet = False  # Hybrid: shard classes + Dirichlet quantity
 shard = 2
 alpha = 0.3
 min_require_size = 10 # Minimum samples per client for data partitioning
 epochs = 300
-localEpoch = 5
-user_num = 100
-user_parti_num = 10
+localEpoch = 20
+user_num = 10
+user_parti_num = 3
 batchSize = 25
-lr = 0.001
-momentum = 0.0
-weight_decay = 0.0
+lr = 0.01
+momentum = 0.9
+weight_decay = 0.0005
 # Training data selection
-cifar = True
+cifar = False
 mnist = False
-fmnist = False
+fmnist = True
 cinic = False
 cifar100 = False
 SVHN = False
 # Model selection
-use_resnet = True  # Set to True to use ResNet-18 instead of AlexNet
+use_resnet = False  # Set to True to use ResNet-18 instead of AlexNet
 split_ratio = 'quarter'  # Legacy: 'half' or 'quarter' (only if split_layer is None)
-split_layer = 'layer1.0.bn1'  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
+split_layer = None  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
 # Random seeds selection
 seed_value = 2023
 torch.manual_seed(seed_value)
