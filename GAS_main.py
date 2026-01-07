@@ -38,7 +38,7 @@ user_parti_num = 10
 batchSize = 25
 lr = 0.001
 momentum = 0.0
-weight_decay = 0.0 #0.0005
+weight_decay = 0.0
 # Training data selection
 cifar = True
 mnist = False
@@ -48,6 +48,8 @@ cifar100 = False
 SVHN = False
 # Model selection
 use_resnet = True  # Set to True to use ResNet-18 instead of AlexNet
+split_ratio = 'quarter'  # Legacy: 'half' or 'quarter' (only if split_layer is None)
+split_layer = 'layer1.0.bn1'  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
 # Random seeds selection
 seed_value = 2023
 torch.manual_seed(seed_value)
@@ -246,7 +248,7 @@ users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, u
                             min_require_size=min_require_size)
 
 # Model initialization
-user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet)
+user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet, split_ratio=split_ratio, split_layer=split_layer)
 user_model.to(device)
 server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
@@ -317,22 +319,32 @@ while epoch != epochs:
     images = images.to(device)
     labels = labels.to(device)
     split_layer_output = user_model(images)
+    
+    # Handle tuple output from fine-grained split (activation, identity)
+    if isinstance(split_layer_output, tuple):
+        activation, identity = split_layer_output
+        features_for_stats = activation  # Use activation for statistics
+    else:
+        activation = split_layer_output
+        identity = None
+        features_for_stats = activation
+    
     if feature_shape is None:
-        feature_shape = split_layer_output[0].shape
+        feature_shape = features_for_stats[0].shape
 
     # Define the weight vector to record the weight of each activation value
     weight_count = clients[selected_client].weight_count
-    weight_vector = torch.tensor([weight_count] * split_layer_output.size(0))
+    weight_vector = torch.tensor([weight_count] * features_for_stats.size(0))
 
     # generate concatenated activation
-    features = split_layer_output.detach()
+    features = features_for_stats.detach()
     count_concat += 1
     if concat_features is None:
         concat_features = features
         concat_labels = labels
         concat_weight_counts = weight_vector
     else:
-        concat_features = torch.cat((concat_features, split_layer_output.detach()), dim=0)
+        concat_features = torch.cat((concat_features, features_for_stats.detach()), dim=0)
         concat_labels = torch.cat((concat_labels, labels), dim=0)
         concat_weight_counts = torch.cat((concat_weight_counts, weight_vector), dim=0)
 
@@ -340,7 +352,7 @@ while epoch != epochs:
     clients[selected_client].weight_count = clients[selected_client].weight_count + 1
 
     # client-side model update
-    local_output = server_model(split_layer_output)
+    local_output = server_model(split_layer_output)  # Pass original output (tuple or tensor)
 
     # localLoss = criterion(local_output, labels)
     localLoss = criterion(local_output + logit_local_adjustments[selected_client], labels.long())
@@ -539,13 +551,21 @@ while epoch != epochs:
                 client_images = client_images.to(device)
                 client_labels = client_labels.to(device)
                 client_split_output = user_model(client_images)
-                client_split_output.retain_grad()
+                
+                # Handle tuple output from fine-grained split
+                if isinstance(client_split_output, tuple):
+                    client_activation = client_split_output[0]
+                    client_activation.retain_grad()
+                else:
+                    client_activation = client_split_output
+                    client_split_output.retain_grad()
+                
                 client_server_output = server_model(client_split_output)
                 client_loss = criterion(client_server_output, client_labels.long())
                 user_model.zero_grad()
                 server_model.zero_grad()
                 client_loss.backward()
-                current_split_grad = client_split_output.grad.mean(dim=0).clone().cpu() if client_split_output.grad is not None else None
+                current_split_grad = client_activation.grad.mean(dim=0).clone().cpu() if client_activation.grad is not None else None
                 split_g = compute_g_score(g_manager.oracle_grads['split'], current_split_grad)
                 del client_images, client_labels, client_split_output, client_server_output, client_loss
                 

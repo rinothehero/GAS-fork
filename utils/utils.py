@@ -63,7 +63,9 @@ def calculate_v_value(server_model, user_model, concat_features, concat_labels, 
     # Calculate gradient dissimilarity
     server_output = server_model(concat_features)
     loss = criterion(server_output, concat_labels.long())
-    grads_sampled = torch.autograd.grad(loss, server_model.parameters(), retain_graph=True, create_graph=True)
+    grads_sampled = torch.autograd.grad(loss, server_model.parameters(), retain_graph=True, create_graph=True, allow_unused=True)
+    # Filter out None gradients (from unused parameters in flexible split)
+    grads_sampled = [g if g is not None else torch.zeros_like(p) for g, p in zip(grads_sampled, server_model.parameters())]
 
     v_value = sum((torch.norm(g - gr) ** 2).item() for g, gr in zip(grads_sampled, grads_real)) / len(
         grads_sampled)

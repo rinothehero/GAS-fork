@@ -120,9 +120,17 @@ def compute_oracle_gradients(user_model, server_model, train_loader, criterion, 
         
         # Forward pass with gradient tracking for split layer
         split_output = user_model(images)
-        split_output.retain_grad()  # Enable gradient capture at split layer
         
-        server_output = server_model(split_output)
+        # Handle tuple output from fine-grained split (activation, identity)
+        if isinstance(split_output, tuple):
+            activation, identity = split_output
+            activation.retain_grad()  # Enable gradient capture at split layer
+            server_output = server_model(split_output)
+        else:
+            split_output.retain_grad()  # Enable gradient capture at split layer
+            activation = split_output
+            server_output = server_model(split_output)
+        
         # USFL-style: use reduction='sum' for exact gradient accumulation
         loss = torch.nn.functional.cross_entropy(server_output, labels.long(), reduction='sum')
         
@@ -141,8 +149,8 @@ def compute_oracle_gradients(user_model, server_model, train_loader, criterion, 
         
         # Accumulate split layer gradient (first batch only for memory)
         # Take mean over batch dimension to make shape batch-size independent
-        if split_grad_accum is None and split_output.grad is not None:
-            split_grad_accum = split_output.grad.mean(dim=0).clone().cpu()
+        if split_grad_accum is None and activation.grad is not None:
+            split_grad_accum = activation.grad.mean(dim=0).clone().cpu()
         
         total_samples += batch_size
         batch_count += 1
@@ -211,8 +219,14 @@ def collect_current_gradients(user_model, server_model, split_output, loss):
             current_grads['server'].append(torch.zeros_like(p).cpu())
     
     # Collect split layer gradient
-    if split_output.grad is not None:
-        current_grads['split'] = split_output.grad.clone().cpu()
+    # Handle tuple output from fine-grained split
+    if isinstance(split_output, tuple):
+        activation = split_output[0]
+    else:
+        activation = split_output
+    
+    if activation.grad is not None:
+        current_grads['split'] = activation.grad.clone().cpu()
     
     return current_grads
 
