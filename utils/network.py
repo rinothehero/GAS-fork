@@ -4,7 +4,7 @@ import numpy as np
 
 
 def model_selection(cifar=False, mnist=False, fmnist=False, cinic=False, cifar100=False, SVHN=False, 
-                    split=False, twoLogit=False, resnet=False, split_ratio='half', split_layer=None):
+                    split=False, twoLogit=False, resnet=False, split_ratio='half', split_layer=None, split_alexnet='default'):
     """
     Model selection for Split Federated Learning.
     
@@ -12,6 +12,7 @@ def model_selection(cifar=False, mnist=False, fmnist=False, cinic=False, cifar10
         split_ratio: Legacy ResNet split point ('half', 'quarter')
         split_layer: Fine-grained split point (e.g., 'layer1', 'layer1.0.bn1', 'layer2')
                      If specified, overrides split_ratio
+        split_alexnet: AlexNet split point ('default': Conv2 후, 'light': Conv1 후)
     """
     num_classes = 10
     if cifar100:
@@ -39,11 +40,19 @@ def model_selection(cifar=False, mnist=False, fmnist=False, cinic=False, cifar10
                     if twoLogit:
                         server_local_model = ResNet18UpCifar(num_classes=num_classes)
             else:
-                # Use AlexNet for Split Learning (default)
-                user_model = AlexNetDownCifar()
-                server_model = AlexNetUpCifar(num_classes=num_classes)
-                if twoLogit:
-                    server_local_model = AlexNetUpCifar(num_classes=num_classes)
+                # Use AlexNet for Split Learning with configurable split point
+                if split_alexnet == 'light':
+                    # Option A: Conv1 이후 (lighter client, more communication)
+                    user_model = AlexNetDownCifarLight()
+                    server_model = AlexNetUpCifarHeavy(num_classes=num_classes)
+                    if twoLogit:
+                        server_local_model = AlexNetUpCifarHeavy(num_classes=num_classes)
+                else:  # 'default'
+                    # Option B: Conv2 이후 (default, balanced)
+                    user_model = AlexNetDownCifar()
+                    server_model = AlexNetUpCifar(num_classes=num_classes)
+                    if twoLogit:
+                        server_local_model = AlexNetUpCifar(num_classes=num_classes)
         elif mnist or fmnist:
             user_model = AlexNetDown()
             server_model = AlexNetUp()
@@ -218,6 +227,52 @@ class AlexNetUpCifar(nn.Module):
         x = x.view(-1, 256*3*3)
         x = self.classifier(x)
         return x
+
+
+class AlexNetDownCifarLight(nn.Module):
+    """Client-side AlexNet Light for CIFAR-10 (split after Conv1 - Option A)"""
+    def __init__(self, width_mult=1):
+        super(AlexNetDownCifarLight, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self, x):
+        # Input: [B, 3, 32, 32]
+        # Output: [B, 32, 16, 16] - activation size 8,192
+        x = self.model(x)
+        return x
+
+
+class AlexNetUpCifarHeavy(nn.Module):
+    """Server-side AlexNet Heavy for CIFAR-10 (receives Conv1 output - Option A)"""
+    def __init__(self, width_mult=1, num_classes=10):
+        super(AlexNetUpCifarHeavy, self).__init__()
+        self.model2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            nn.ReLU(inplace=True),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(256 * 3 * 3, 1024),
+            nn.Linear(1024, 512),
+            nn.Linear(512, num_classes),
+        )
+    def forward(self, x):
+        # Input: [B, 32, 16, 16] from client
+        x = self.model2(x)
+        x = x.view(-1, 256*3*3)
+        x = self.classifier(x)
+        return x
+
 
 class AlexNetDown(nn.Module):
     def __init__(self, width_mult=1):

@@ -21,35 +21,36 @@ from utils import calculate_v_value, replace_user, sample_or_generate_features, 
 from g_measurement import GMeasurementManager
 
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Experimental parameter settings
 iid = False
-dirichlet = True
-label_dirichlet = False  # Hybrid: shard classes + Dirichlet quantity
-shard = 2
-alpha = 0.3
+dirichlet = False
+label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
+shard = 8
+alpha = 0.9
 min_require_size = 10 # Minimum samples per client for data partitioning
 epochs = 300
-localEpoch = 20
-user_num = 10
-user_parti_num = 3
+localEpoch = 5
+user_num = 100
+user_parti_num = 10
 batchSize = 25
-lr = 0.01
-momentum = 0.9
-weight_decay = 0.0005
+lr = 0.001
+momentum = 0.0
+weight_decay = 0.0
 # Training data selection
-cifar = False
+cifar = True
 mnist = False
-fmnist = True
+fmnist = False
 cinic = False
 cifar100 = False
 SVHN = False
 # Model selection
-use_resnet = False  # Set to True to use ResNet-18 instead of AlexNet
+use_resnet = False
 split_ratio = 'quarter'  # Legacy: 'half' or 'quarter' (only if split_layer is None)
-split_layer = None  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
+split_layer = "layer1.1.bn2"  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
+split_alexnet = 'default'
 # Random seeds selection
 seed_value = 2023
 torch.manual_seed(seed_value)
@@ -248,7 +249,7 @@ users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, u
                             min_require_size=min_require_size)
 
 # Model initialization
-user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet, split_ratio=split_ratio, split_layer=split_layer)
+user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet, split_ratio=split_ratio, split_layer=split_layer, split_alexnet=split_alexnet)
 user_model.to(device)
 server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
@@ -644,17 +645,56 @@ selectDataset = "cifar10" if cifar else "mnist" if mnist else "fmnist" if fmnist
 selectMethod = "Generative Activation-Aided" if Generate else "Original"
 IfCilp = "clip" if clip_grad else "not clip"
 
-with open('GAS_main.txt', 'w') as f:
-    if dirichlet:
-        f.write(
-            f'seed_value: {seed_value}; alpha: {alpha}; epochs: {epochs}; {selectDataset}; local epoch: {localEpoch}; {IfCilp};\n'
-            f'num of clients: {user_num}; num of participating clients: {user_parti_num}; batchsize: {batchSize}; learning rate: {lr}; \n'
-            f'Method: {selectMethod}; sample frequency: {Sample_Frequency}; \n')
+# Generate filename with timestamp
+timestamp_str = end_time.strftime("%Y%m%d_%H%M%S")
+output_filename = f'GAS_main_{timestamp_str}.txt'
+
+with open(output_filename, 'w') as f:
+    # ===== Configuration Summary =====
+    f.write("="*60 + "\n")
+    f.write("EXPERIMENT CONFIGURATION\n")
+    f.write("="*60 + "\n")
+    
+    # Model settings
+    model_type = "ResNet-18" if use_resnet else "AlexNet"
+    f.write(f"Model: {model_type}\n")
+    if use_resnet:
+        f.write(f"  split_layer: {split_layer}\n")
+        f.write(f"  split_ratio: {split_ratio}\n")
     else:
-        f.write(
-            f'seed_value: {seed_value}; shard: {shard}; epochs: {epochs}; {selectDataset}; local epoch: {localEpoch}; {IfCilp};\n'
-            f'num of clients: {user_num}; num of participating clients: {user_parti_num}; batchsize: {batchSize}; learning rate: {lr}; \n'
-            f'Method: {selectMethod}; sample frequency: {Sample_Frequency}; \n')
+        f.write(f"  split_alexnet: {split_alexnet}\n")
+    
+    # Data settings
+    f.write(f"\nData Settings:\n")
+    f.write(f"  Dataset: {selectDataset}\n")
+    f.write(f"  IID: {iid}, Dirichlet: {dirichlet}, Label_Dirichlet: {label_dirichlet}\n")
+    f.write(f"  Alpha: {alpha}, Shard: {shard}, Min_require_size: {min_require_size}\n")
+    
+    # Training settings
+    f.write(f"\nTraining Settings:\n")
+    f.write(f"  Epochs: {epochs}, LocalEpoch: {localEpoch}\n")
+    f.write(f"  Users: {user_num}, Participating: {user_parti_num}\n")
+    f.write(f"  BatchSize: {batchSize}, LR: {lr}\n")
+    f.write(f"  Momentum: {momentum}, Weight_decay: {weight_decay}\n")
+    f.write(f"  Clip_grad: {clip_grad}\n")
+    
+    # GAS settings
+    f.write(f"\nGAS Settings:\n")
+    f.write(f"  Generate: {Generate}, Sample_Frequency: {Sample_Frequency}\n")
+    f.write(f"  V_Test: {V_Test}, V_Test_Frequency: {V_Test_Frequency}\n")
+    f.write(f"  G_Measurement: {G_Measurement}, G_Measure_Frequency: {G_Measure_Frequency}\n")
+    f.write(f"  WRTT: {WRTT}\n")
+    
+    # Other
+    f.write(f"\nOther:\n")
+    f.write(f"  Seed: {seed_value}\n")
+    f.write(f"  Method: {selectMethod}\n")
+    f.write("="*60 + "\n\n")
+    
+    # ===== Results =====
+    f.write("RESULTS\n")
+    f.write("-"*60 + "\n")
+    
     if V_Test is True:
         f.write(f'Test Frequency is {V_Test_Frequency}; \n')
         f.write('Gradient Dissimilarity = [' + total_v_value_str + ']\n')
