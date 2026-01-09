@@ -43,12 +43,15 @@ dirichlet = False
 label_dirichlet = False  # Hybrid: shard classes + Dirichlet quantity
 shard = 5
 alpha = 0.9
+min_require_size = 10  # Minimum samples per client for data partitioning
 epochs = 2000
 localEpoch = 20
 user_num = 20
 user_parti_num = 10
 batchSize = 32
 lr = 0.01
+momentum = 0.9
+weight_decay = 0.0005
 # Training data selection
 cifar = True
 mnist = False
@@ -56,6 +59,9 @@ fmnist = False
 cinic = False
 cifar100 = False
 SVHN = False
+# Model selection
+use_resnet = False  # Set to True to use ResNet-18 instead of AlexNet
+split_ratio = 'half'  # 'half': 1/2 Down 1/2 Up, 'quarter': 1/4 Down 3/4 Up
 # Random seeds selection
 seed_value = 2023
 torch.manual_seed(seed_value)
@@ -103,7 +109,7 @@ train_label = np.array(alllabel)[train_index]
 # Partition data among users
 users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform,
                             user_num, batchSize, alpha, shard, drop=False, classOfLabel=classOfLabel,
-                            label_dirichlet=label_dirichlet)
+                            label_dirichlet=label_dirichlet, min_require_size=min_require_size)
 
 # Full training data for Oracle gradient computation (with proper transforms)
 if G_Measurement:
@@ -115,7 +121,7 @@ if G_Measurement:
 # ==============      initialization        ===============
 # =========================================================
 
-user_model, server_model = network.model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN)
+user_model, server_model = network.model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet, split_ratio=split_ratio)
 
 user_model.to(device)
 server_model.to(device)
@@ -123,8 +129,8 @@ server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
 serverParam = copy.deepcopy(server_model.state_dict())
 
-optimizer_down = torch.optim.SGD(user_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
-optimizer_up = torch.optim.SGD(server_model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+optimizer_down = torch.optim.SGD(user_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
+optimizer_up = torch.optim.SGD(server_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
 
 criterion = nn.CrossEntropyLoss()
 

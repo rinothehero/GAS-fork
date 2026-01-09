@@ -38,14 +38,18 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Experimental parameter settings
 iid = False
 dirichlet = False
+label_dirichlet = False  # Hybrid: shard classes + Dirichlet quantity
 shard = 2
 alpha = 0.1
+min_require_size = 10  # Minimum samples per client for data partitioning
 epochs = 2000
 localEpoch = 20
 user_num = 20
 user_parti_num = 10
 batchSize = 32
 lr = 0.01
+momentum = 0.9
+weight_decay = 0.0005
 # Training data selection
 cifar = True
 mnist = False
@@ -90,7 +94,8 @@ train_label = np.array(alllabel)[train_index]
 
 # Partition data among users
 users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform,
-                            user_num, batchSize, alpha, shard, drop=False, classOfLabel=classOfLabel)
+                            user_num, batchSize, alpha, shard, drop=False, classOfLabel=classOfLabel,
+                            label_dirichlet=label_dirichlet, min_require_size=min_require_size)
 
 # =========================================================
 # ==============      initialization        ===============
@@ -101,7 +106,7 @@ model.to(device)
 
 userParam = copy.deepcopy(model.state_dict())
 
-optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
 
 criterion = nn.CrossEntropyLoss()
 
