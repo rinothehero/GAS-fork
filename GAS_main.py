@@ -3,7 +3,7 @@ import os
 
 # Set up paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
-utils_path = os.path.join(current_dir, 'utils')
+utils_path = os.path.join(current_dir, "utils")
 if utils_path not in sys.path:
     sys.path.append(utils_path)
 
@@ -16,8 +16,13 @@ import numpy as np
 import datetime
 from network import model_selection
 from dataset import Dataset, Data_Partition
-from utils import calculate_v_value, replace_user, sample_or_generate_features, \
-    compute_local_adjustment, find_client_with_min_time
+from utils import (
+    calculate_v_value,
+    replace_user,
+    sample_or_generate_features,
+    compute_local_adjustment,
+    find_client_with_min_time,
+)
 from g_measurement import GMeasurementManager
 
 
@@ -30,7 +35,7 @@ dirichlet = False
 label_dirichlet = True  # Hybrid: shard classes + Dirichlet quantity
 shard = 8
 alpha = 0.9
-min_require_size = 10 # Minimum samples per client for data partitioning
+min_require_size = 10  # Minimum samples per client for data partitioning
 epochs = 300
 localEpoch = 5
 user_num = 100
@@ -47,9 +52,9 @@ cinic = False
 cifar100 = False
 SVHN = False
 # Model selection
-use_resnet = False
-split_ratio = 'quarter'  # Legacy: 'half' or 'quarter' (only if split_layer is None)
-split_layer = "layer1.1.bn2"  # Fine-grained: 'layer1', 'layer1.0.bn1', 'layer2', etc.
+use_resnet = True
+split_ratio = "quarter"  # Legacy: 'half' or 'quarter' (only if split_layer is None)
+split_layer = 'layer1.1.bn2'
 split_alexnet = 'default'
 # Random seeds selection
 seed_value = 2023
@@ -70,18 +75,19 @@ num_label = 100 if cifar100 else 10
 # G Measurement Settings (USFL-style 3-perspective)
 G_Measurement = True  # Enable 3-perspective G measurement
 G_Measure_Frequency = 10  # Diagnostic round frequency (every N epochs)
+G_Measure_Mode = "strict"  # 'strict' (Global Model) or 'realistic' (Individual Models)
 
 # Simulate real communication environments
-WRTT = True   # True for simulation, False for no simulation
+WRTT = True  # True for simulation, False for no simulation
 
 
-'''communication formulation'''
+"""communication formulation"""
 
 
 # Initialize client computing capabilities
 def generate_computing(user_num):
     # 10**9 ～ 10**10 FLOPs
-    return np.random.uniform(10 ** 9, 10 ** 10, user_num)
+    return np.random.uniform(10**9, 10**10, user_num)
 
 
 def generate_position(user_num):
@@ -92,7 +98,7 @@ clients_computing = generate_computing(user_num)
 clients_position = generate_position(user_num)
 
 # Calculate the communication rate for each client
-w = 10 ** 7
+w = 10**7
 N = 3.981 * 10 ** (-21)
 rates = []
 for i in range(user_num):
@@ -119,12 +125,21 @@ if WRTT is True:
     print(rates)
 
 
-'''Class Definition'''
+"""Class Definition"""
 
 
 # Client class definition
 class Client:
-    def __init__(self, user_data, local_epoch, minibatch=0, computing=0, rate=0, time=0, weight_count=1):
+    def __init__(
+        self,
+        user_data,
+        local_epoch,
+        minibatch=0,
+        computing=0,
+        rate=0,
+        time=0,
+        weight_count=1,
+    ):
         self.user_data = user_data
         self.dataloader_iter = iter(user_data)
         self.local_epoch = local_epoch
@@ -158,25 +173,27 @@ class Client:
         # AlexNet
         workload = 5603328  # Workload of one image FLOPs
         # workload *= self.minibatch  # parallel computations
-        self.time += (workload / self.computing)
+        self.time += workload / self.computing
 
     def transmit_activation(self):
         # AlexNet
         activation = 131072  # Size of an activation value (bit) (64 * 8 * 8 * 32)
         activation *= self.minibatch
-        self.time += (activation / self.rate)
+        self.time += activation / self.rate
 
     def transmit_model(self):
         # AlexNet
         model_volume = 620544
-        self.time += (model_volume / self.rate)
+        self.time += model_volume / self.rate
 
 
 # IncrementalStats class for maintaining mean and variance
 class IncrementalStats:
     def __init__(self, device, diagonal=False):
         self.device = device
-        self.diagonal = diagonal  # True for ResNet (memory efficient), False for AlexNet
+        self.diagonal = (
+            diagonal  # True for ResNet (memory efficient), False for AlexNet
+        )
         self.means = {}
         self.variances = {}
         self.weight = {}
@@ -206,24 +223,37 @@ class IncrementalStats:
 
             # Update mean
             self.means[label] = decay_factor * old_mean + (1 - decay_factor) * new_mean
-            
+
             if self.diagonal:
                 # Diagonal variance (for ResNet - memory efficient)
-                self.variances[label] = decay_factor * (
-                        old_var + (self.means[label] - old_mean) ** 2
-                ) + (1 - decay_factor) * (
-                        new_var_or_cov + (self.means[label] - new_mean) ** 2
-                ) + regularization_term
+                self.variances[label] = (
+                    decay_factor * (old_var + (self.means[label] - old_mean) ** 2)
+                    + (1 - decay_factor)
+                    * (new_var_or_cov + (self.means[label] - new_mean) ** 2)
+                    + regularization_term
+                )
             else:
                 # Full covariance matrix (for AlexNet - more accurate)
                 n = new_mean.shape[0]
                 I = torch.eye(n).to(self.device)
-                self.variances[label] = decay_factor * (
-                        old_var + torch.outer(self.means[label] - old_mean, self.means[label] - old_mean)) \
-                                        + (1 - decay_factor) * (new_var_or_cov + torch.outer(self.means[label] - new_mean,
-                                                                                      self.means[label] - new_mean)) + regularization_term * I
+                self.variances[label] = (
+                    decay_factor
+                    * (
+                        old_var
+                        + torch.outer(
+                            self.means[label] - old_mean, self.means[label] - old_mean
+                        )
+                    )
+                    + (1 - decay_factor)
+                    * (
+                        new_var_or_cov
+                        + torch.outer(
+                            self.means[label] - new_mean, self.means[label] - new_mean
+                        )
+                    )
+                    + regularization_term * I
+                )
             self.counts[label] += 1
-
 
     def get_stats(self, label):
         """
@@ -234,35 +264,69 @@ class IncrementalStats:
         return self.means.get(label, None), self.variances.get(label, None)
 
 
-'''Main Train'''
+"""Main Train"""
 
 # Data loading and preprocessing
-alldata, alllabel, test_set, transform = Dataset(cifar=cifar, mnist=mnist, fmnist=fmnist, cinic=cinic,
-                                                 cifar100=cifar100, SVHN=SVHN)
+alldata, alllabel, test_set, transform = Dataset(
+    cifar=cifar, mnist=mnist, fmnist=fmnist, cinic=cinic, cifar100=cifar100, SVHN=SVHN
+)
 test_loader = dataloader.DataLoader(dataset=test_set, batch_size=128, shuffle=True)
 train_index = np.arange(0, len(alldata))
 random.shuffle(train_index)
 train_img = np.array(alldata)[train_index]
 train_label = np.array(alllabel)[train_index]
-users_data = Data_Partition(iid, dirichlet, train_img, train_label, transform, user_num, batchSize, alpha, shard,
-                            drop=False, classOfLabel=num_label, label_dirichlet=label_dirichlet,
-                            min_require_size=min_require_size)
+users_data = Data_Partition(
+    iid,
+    dirichlet,
+    train_img,
+    train_label,
+    transform,
+    user_num,
+    batchSize,
+    alpha,
+    shard,
+    drop=False,
+    classOfLabel=num_label,
+    label_dirichlet=label_dirichlet,
+    min_require_size=min_require_size,
+)
 
 # Model initialization
-user_model, server_model = model_selection(cifar, mnist, fmnist, cinic=cinic, split=True, cifar100=cifar100, SVHN=SVHN, resnet=use_resnet, split_ratio=split_ratio, split_layer=split_layer, split_alexnet=split_alexnet)
+user_model, server_model = model_selection(
+    cifar,
+    mnist,
+    fmnist,
+    cinic=cinic,
+    split=True,
+    cifar100=cifar100,
+    SVHN=SVHN,
+    resnet=use_resnet,
+    split_ratio=split_ratio,
+    split_layer=split_layer,
+    split_alexnet=split_alexnet,
+)
 user_model.to(device)
 server_model.to(device)
 userParam = copy.deepcopy(user_model.state_dict())
-optimizer_down = torch.optim.SGD(user_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
-optimizer_up = torch.optim.SGD(server_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
+optimizer_down = torch.optim.SGD(
+    user_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay
+)
+optimizer_up = torch.optim.SGD(
+    server_model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay
+)
 criterion = nn.CrossEntropyLoss()
 
 # Initialize clients
 if WRTT is True:
-    clients = [Client(users_data[i], localEpoch, batchSize, clients_computing[i], rates[i], 0) for i in range(user_num)]
+    clients = [
+        Client(users_data[i], localEpoch, batchSize, clients_computing[i], rates[i], 0)
+        for i in range(user_num)
+    ]
 else:
     clients = [Client(users_data[i], localEpoch) for i in range(user_num)]
-stats = IncrementalStats(device=device, diagonal=use_resnet)  # ResNet uses diagonal, AlexNet uses full covariance
+stats = IncrementalStats(
+    device=device, diagonal=use_resnet
+)  # ResNet uses diagonal, AlexNet uses full covariance
 condensed_data = {c: None for c in range(num_label)}
 train_begin_time = datetime.datetime.now()
 
@@ -273,6 +337,7 @@ if G_Measurement:
     g_manager = GMeasurementManager(device, measure_frequency=G_Measure_Frequency)
     # Create a DataLoader for full training data (for Oracle computation with proper transforms)
     from dataset import TrainSet
+
     full_train_set = TrainSet(train_img, train_label, transform)
     full_train_loader = dataloader.DataLoader(
         dataset=full_train_set, batch_size=batchSize, shuffle=False, drop_last=False
@@ -285,7 +350,9 @@ total_v_value = []
 local_models_time = []
 time_record = []
 epoch = 0
-order = np.random.choice(range(user_num), user_parti_num, replace=False)  # 初始选择的用户
+order = np.random.choice(
+    range(user_num), user_parti_num, replace=False
+)  # 初始选择的用户
 if WRTT is True:  # initialize training time
     for i in order:
         clients[i].model_process()
@@ -314,13 +381,15 @@ while epoch != epochs:
         selected_client = find_client_with_min_time(clients, order)
     else:
         selected_client = np.random.choice(order)
-    user_model.load_state_dict(usersParam[np.where(order == selected_client)[0][0]], strict=True)
+    user_model.load_state_dict(
+        usersParam[np.where(order == selected_client)[0][0]], strict=True
+    )
     # train
     images, labels = clients[selected_client].train_one_iteration()
     images = images.to(device)
     labels = labels.to(device)
     split_layer_output = user_model(images)
-    
+
     # Handle tuple output from fine-grained split (activation, identity)
     if isinstance(split_layer_output, tuple):
         activation, identity = split_layer_output
@@ -329,7 +398,7 @@ while epoch != epochs:
         activation = split_layer_output
         identity = None
         features_for_stats = activation
-    
+
     if feature_shape is None:
         feature_shape = features_for_stats[0].shape
 
@@ -345,7 +414,9 @@ while epoch != epochs:
         concat_labels = labels
         concat_weight_counts = weight_vector
     else:
-        concat_features = torch.cat((concat_features, features_for_stats.detach()), dim=0)
+        concat_features = torch.cat(
+            (concat_features, features_for_stats.detach()), dim=0
+        )
         concat_labels = torch.cat((concat_labels, labels), dim=0)
         concat_weight_counts = torch.cat((concat_weight_counts, weight_vector), dim=0)
 
@@ -353,51 +424,75 @@ while epoch != epochs:
     clients[selected_client].weight_count = clients[selected_client].weight_count + 1
 
     # client-side model update
-    local_output = server_model(split_layer_output)  # Pass original output (tuple or tensor)
+    local_output = server_model(
+        split_layer_output
+    )  # Pass original output (tuple or tensor)
 
     # localLoss = criterion(local_output, labels)
-    localLoss = criterion(local_output + logit_local_adjustments[selected_client], labels.long())
+    localLoss = criterion(
+        local_output + logit_local_adjustments[selected_client], labels.long()
+    )
     optimizer_down.zero_grad()
     localLoss.backward()
     if clip_grad:
         torch.nn.utils.clip_grad_norm_(parameters=user_model.parameters(), max_norm=10)
     optimizer_down.step()
-    usersParam[np.where(order == selected_client)[0][0]] = copy.deepcopy(user_model.state_dict())
+    usersParam[np.where(order == selected_client)[0][0]] = copy.deepcopy(
+        user_model.state_dict()
+    )
     if WRTT is True:  # Record the time of the backward pass
         clients[selected_client].model_process()
 
-    '''Activations generation and server-side model update'''
+    """Activations generation and server-side model update"""
     if count_concat == user_parti_num:
         # print("local_epoch: " + str(local_epoch))
         local_epoch += 1
         # update activation distributions
-        unique_labels, counts = concat_labels.unique(return_counts=True)  # Count how many of each label
+        unique_labels, counts = concat_labels.unique(
+            return_counts=True
+        )  # Count how many of each label
 
         label_weights = {}
         concat_weight_counts = concat_weight_counts.to(device)
         for label in unique_labels:
-            mask = (concat_labels == label)
+            mask = concat_labels == label
             weights_of_label = concat_weight_counts[mask].float()
             label_weights[label.item()] = weights_of_label.sum().item()
 
         # Calculate mean and variance/covariance
         flatten_features = concat_features.flatten(start_dim=1)
         for label in unique_labels:
-            mask = (concat_labels == label)
+            mask = concat_labels == label
             features_of_label = flatten_features[mask]
             weights_of_label = concat_weight_counts[mask].float()
             total_weight = weights_of_label.sum()
-            mean_feature = torch.sum(features_of_label * weights_of_label[:, None], dim=0) / total_weight
+            mean_feature = (
+                torch.sum(features_of_label * weights_of_label[:, None], dim=0)
+                / total_weight
+            )
             centered_features = features_of_label - mean_feature
-            
+
             if use_resnet:
                 # Diagonal variance for ResNet (memory efficient)
-                var_vector = torch.sum((centered_features ** 2) * weights_of_label[:, None], dim=0) / total_weight
-                stats.update(mean_feature, var_vector, label_weights[label.item()], label.item())
+                var_vector = (
+                    torch.sum((centered_features**2) * weights_of_label[:, None], dim=0)
+                    / total_weight
+                )
+                stats.update(
+                    mean_feature, var_vector, label_weights[label.item()], label.item()
+                )
             else:
                 # Full covariance matrix for AlexNet (more accurate)
-                cov_matrix = torch.matmul((centered_features * weights_of_label[:, None]).T, centered_features) / total_weight
-                stats.update(mean_feature, cov_matrix, label_weights[label.item()], label.item())
+                cov_matrix = (
+                    torch.matmul(
+                        (centered_features * weights_of_label[:, None]).T,
+                        centered_features,
+                    )
+                    / total_weight
+                )
+                stats.update(
+                    mean_feature, cov_matrix, label_weights[label.item()], label.item()
+                )
         if Generate is True:
             # Activations generation
             if local_epoch % Sample_Frequency == 0:
@@ -408,9 +503,16 @@ while epoch != epochs:
                         all_labels_have_stats = False
                         break
                 if all_labels_have_stats:
-                    concat_features, concat_labels = sample_or_generate_features(concat_features, concat_labels,
-                                                                                 batchSize, num_label, feature_shape,
-                                                                                 device, stats, diagonal=use_resnet)
+                    concat_features, concat_labels = sample_or_generate_features(
+                        concat_features,
+                        concat_labels,
+                        batchSize,
+                        num_label,
+                        feature_shape,
+                        device,
+                        stats,
+                        diagonal=use_resnet,
+                    )
 
         # server-side model update
         for param in server_model.parameters():
@@ -420,7 +522,9 @@ while epoch != epochs:
         optimizer_up.zero_grad()
         loss.backward()
         if clip_grad:
-            torch.nn.utils.clip_grad_norm_(parameters=server_model.parameters(), max_norm=10)
+            torch.nn.utils.clip_grad_norm_(
+                parameters=server_model.parameters(), max_norm=10
+            )
         optimizer_up.step()
         if V_Test is True:
             concat_labels_V = copy.deepcopy(concat_labels)
@@ -440,17 +544,23 @@ while epoch != epochs:
         if sumClientParam is None:
             sumClientParam = usersParam[np.where(order == selected_client)[0][0]]
             for key in usersParam[np.where(order == selected_client)[0][0]]:
-                sumClientParam[key] = usersParam[np.where(order == selected_client)[0][0]][key] * (1 / user_parti_num)
+                sumClientParam[key] = usersParam[
+                    np.where(order == selected_client)[0][0]
+                ][key] * (1 / user_parti_num)
         else:
             for key in usersParam[np.where(order == selected_client)[0][0]]:
-                sumClientParam[key] += usersParam[np.where(order == selected_client)[0][0]][key] * (1 / user_parti_num)
-        if count_local == user_parti_num:  # Update the client model if the buffer is full
+                sumClientParam[key] += usersParam[
+                    np.where(order == selected_client)[0][0]
+                ][key] * (1 / user_parti_num)
+        if (
+            count_local == user_parti_num
+        ):  # Update the client model if the buffer is full
             total_weight_count += local_epoch
             userParam = copy.deepcopy(sumClientParam)
             sumClientParam = None
             count_local = 0
 
-            test_flag = ((epoch + 1) % Accu_Test_Frequency == 0)
+            test_flag = (epoch + 1) % Accu_Test_Frequency == 0
             epoch += 1
 
             if WRTT:
@@ -482,77 +592,124 @@ while epoch != epochs:
 
             # V test
             if V_Test and (epoch + 1) % V_Test_Frequency == 0:
-                v_value = calculate_v_value(server_model, user_model, concat_features_V, concat_labels_V, test_loader,
-                                            criterion, device)
+                v_value = calculate_v_value(
+                    server_model,
+                    user_model,
+                    concat_features_V,
+                    concat_labels_V,
+                    test_loader,
+                    criterion,
+                    device,
+                )
                 print(f"Epoch {epoch + 1}, V Value: {v_value}")
                 total_v_value.append(v_value)
 
             # G Measurement (USFL-style 3-perspective)
-            if G_Measurement and g_manager is not None and g_manager.should_measure(epoch):
+            if (
+                G_Measurement
+                and g_manager is not None
+                and g_manager.should_measure(epoch)
+            ):
                 # Compute Oracle gradients (full training data)
-                g_manager.compute_oracle(user_model, server_model, full_train_loader, criterion)
-                
+                g_manager.compute_oracle(
+                    user_model, server_model, full_train_loader, criterion
+                )
+
                 # Backup BN stats before Current gradient computation
-                from g_measurement import backup_bn_stats, restore_bn_stats, collect_current_gradients, compute_all_g_scores
+                from g_measurement import (
+                    backup_bn_stats,
+                    restore_bn_stats,
+                    collect_current_gradients,
+                    compute_all_g_scores,
+                )
+
                 user_bn_backup = backup_bn_stats(user_model)
                 server_bn_backup = backup_bn_stats(server_model)
-                
+
                 user_model.train()
                 server_model.train()
-                
+
                 # ========== Client G: Compute for EACH participating client ==========
                 from g_measurement import compute_g_score
+
                 per_client_g = {}
-                
+
                 for client_idx, client_id in enumerate(order):
-                    # Load this client's model
-                    user_model.load_state_dict(usersParam[client_idx], strict=True)
-                    
+                    # Select model based on G_Measure_Mode
+                    if G_Measure_Mode == "strict":
+                        # Load Global Model for fair comparison with SFL/MultiSFL
+                        user_model.load_state_dict(userParam, strict=True)
+                    else:
+                        # Load individual async model (Realistic GAS behavior)
+                        user_model.load_state_dict(usersParam[client_idx], strict=True)
+
                     # Get a batch from this client's data
-                    client_images, client_labels = clients[client_id].train_one_iteration()
+                    client_images, client_labels = clients[
+                        client_id
+                    ].train_one_iteration()
                     client_images = client_images.to(device)
                     client_labels = client_labels.to(device)
-                    
+
                     # Forward pass
                     client_split_output = user_model(client_images)
                     client_server_output = server_model(client_split_output)
                     client_loss = criterion(client_server_output, client_labels.long())
-                    
+
                     # Backward for client gradients
                     user_model.zero_grad()
                     server_model.zero_grad()
                     client_loss.backward()
-                    
+
                     # Collect Client gradients
-                    current_client_grads = [p.grad.clone().cpu() if p.grad is not None else torch.zeros_like(p).cpu() 
-                                            for p in user_model.parameters()]
-                    
+                    current_client_grads = [
+                        p.grad.clone().cpu()
+                        if p.grad is not None
+                        else torch.zeros_like(p).cpu()
+                        for p in user_model.parameters()
+                    ]
+
                     # Compute Client G for this client (with details)
-                    g_details = compute_g_score(g_manager.oracle_grads['client'], current_client_grads, return_details=True)
+                    g_details = compute_g_score(
+                        g_manager.oracle_grads["client"],
+                        current_client_grads,
+                        return_details=True,
+                    )
                     per_client_g[client_id] = g_details
-                    
+
                     # Cleanup
-                    del client_images, client_labels, client_split_output, client_server_output, client_loss
+                    del (
+                        client_images,
+                        client_labels,
+                        client_split_output,
+                        client_server_output,
+                        client_loss,
+                    )
                     del current_client_grads
-                
+
                 # Print per-client G with details
                 print(f"[G Measurement] Epoch {epoch} - Per-Client G:")
                 for cid, gd in per_client_g.items():
-                    print(f"  Client {cid}: ||oracle||={gd['oracle_norm']:.4f}, ||current||={gd['current_norm']:.4f}, "
-                          f"G={gd['G']:.4f}, G_rel={gd['G_rel']:.1f}%")
-                avg_client_g = sum(gd['G'] for gd in per_client_g.values()) / len(per_client_g)
-                avg_g_rel = sum(gd['G_rel'] for gd in per_client_g.values()) / len(per_client_g)
+                    print(
+                        f"  Client {cid}: ||oracle||={gd['oracle_norm']:.4f}, ||current||={gd['current_norm']:.4f}, "
+                        f"G={gd['G']:.4f}, G_rel={gd['G_rel']:.1f}%"
+                    )
+                avg_client_g = sum(gd["G"] for gd in per_client_g.values()) / len(
+                    per_client_g
+                )
+                avg_g_rel = sum(gd["G_rel"] for gd in per_client_g.values()) / len(
+                    per_client_g
+                )
                 print(f"  Average: G={avg_client_g:.4f}, G_rel={avg_g_rel:.1f}%")
-                
+
                 # Restore shared model for split/server G measurement
                 user_model.load_state_dict(userParam, strict=True)
-                
+
                 # ========== Split G: Use one client for split layer gradient ==========
                 client_images, client_labels = clients[order[0]].train_one_iteration()
                 client_images = client_images.to(device)
                 client_labels = client_labels.to(device)
                 client_split_output = user_model(client_images)
-                
+
                 # Handle tuple output from fine-grained split
                 if isinstance(client_split_output, tuple):
                     client_activation = client_split_output[0]
@@ -560,44 +717,64 @@ while epoch != epochs:
                 else:
                     client_activation = client_split_output
                     client_split_output.retain_grad()
-                
+
                 client_server_output = server_model(client_split_output)
                 client_loss = criterion(client_server_output, client_labels.long())
                 user_model.zero_grad()
                 server_model.zero_grad()
                 client_loss.backward()
-                current_split_grad = client_activation.grad.mean(dim=0).clone().cpu() if client_activation.grad is not None else None
-                split_g = compute_g_score(g_manager.oracle_grads['split'], current_split_grad)
-                del client_images, client_labels, client_split_output, client_server_output, client_loss
-                
+                current_split_grad = (
+                    client_activation.grad.mean(dim=0).clone().cpu()
+                    if client_activation.grad is not None
+                    else None
+                )
+                split_g = compute_g_score(
+                    g_manager.oracle_grads["split"], current_split_grad
+                )
+                del (
+                    client_images,
+                    client_labels,
+                    client_split_output,
+                    client_server_output,
+                    client_loss,
+                )
+
                 # ========== Server G: Use concat_features (server's actual input) ==========
                 user_model.zero_grad()
                 server_model.zero_grad()
-                
+
                 server_input = concat_features_V.clone().detach().requires_grad_(True)
                 server_output = server_model(server_input)
                 server_loss = criterion(server_output, concat_labels_V.long())
                 server_loss.backward()
-                
+
                 # Collect Server gradients
-                current_server_grads = [p.grad.clone().cpu() if p.grad is not None else torch.zeros_like(p).cpu() 
-                                        for p in server_model.parameters()]
-                server_g = compute_g_score(g_manager.oracle_grads['server'], current_server_grads)
-                
+                current_server_grads = [
+                    p.grad.clone().cpu()
+                    if p.grad is not None
+                    else torch.zeros_like(p).cpu()
+                    for p in server_model.parameters()
+                ]
+                server_g = compute_g_score(
+                    g_manager.oracle_grads["server"], current_server_grads
+                )
+
                 # Record G scores (average client G)
-                g_manager.g_history['client_g'].append(avg_client_g)
-                g_manager.g_history['server_g'].append(server_g)
-                g_manager.g_history['split_g'].append(split_g)
-                
-                print(f"[G Measurement] Epoch {epoch}: "
-                      f"Avg Client G = {avg_client_g:.6f}, "
-                      f"Server G = {server_g:.6f}, "
-                      f"Split G = {split_g:.6f}")
-                
+                g_manager.g_history["client_g"].append(avg_client_g)
+                g_manager.g_history["server_g"].append(server_g)
+                g_manager.g_history["split_g"].append(split_g)
+
+                print(
+                    f"[G Measurement] Epoch {epoch}: "
+                    f"Avg Client G = {avg_client_g:.6f}, "
+                    f"Server G = {server_g:.6f}, "
+                    f"Split G = {split_g:.6f}"
+                )
+
                 # Restore BN stats
                 restore_bn_stats(user_model, user_bn_backup, device)
                 restore_bn_stats(server_model, server_bn_backup, device)
-                
+
                 # Cleanup
                 g_manager.oracle_grads = None
                 user_model.zero_grad()
@@ -622,7 +799,9 @@ while epoch != epochs:
             order = replace_user(order, selected_client, user_num)
             clients[order[index]].weight_count = total_weight_count
     else:
-        if WRTT is True:  # Record the training time if the client continues with local iterations
+        if (
+            WRTT is True
+        ):  # Record the training time if the client continues with local iterations
             clients[selected_client].model_process()
             clients[selected_client].transmit_activation()
 
@@ -630,31 +809,44 @@ while epoch != epochs:
 print(time_record)
 print(total_accuracy)
 print(total_v_value)
-time_record_str = ', '.join(str(x) for x in time_record)
-total_accuracy_str = ', '.join(str(x) for x in total_accuracy)
-total_v_value_str = ', '.join(str(x) for x in total_v_value)
-print('time = [' + time_record_str + ']')
-print('GAS = [' + total_accuracy_str + ']')
+time_record_str = ", ".join(str(x) for x in time_record)
+total_accuracy_str = ", ".join(str(x) for x in total_accuracy)
+total_v_value_str = ", ".join(str(x) for x in total_v_value)
+print("time = [" + time_record_str + "]")
+print("GAS = [" + total_accuracy_str + "]")
 
 end_time = datetime.datetime.now()
 begin_time_str = train_begin_time.strftime("%Y-%m-%d %H:%M:%S")
 end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
 
-selectDataset = "cifar10" if cifar else "mnist" if mnist else "fmnist" if fmnist else "cinic" if cinic else "cifar100" \
-    if cifar100 else "SVHN" if SVHN else "None"
+selectDataset = (
+    "cifar10"
+    if cifar
+    else "mnist"
+    if mnist
+    else "fmnist"
+    if fmnist
+    else "cinic"
+    if cinic
+    else "cifar100"
+    if cifar100
+    else "SVHN"
+    if SVHN
+    else "None"
+)
 selectMethod = "Generative Activation-Aided" if Generate else "Original"
 IfCilp = "clip" if clip_grad else "not clip"
 
 # Generate filename with timestamp
 timestamp_str = end_time.strftime("%Y%m%d_%H%M%S")
-output_filename = f'GAS_main_{timestamp_str}.txt'
+output_filename = f"GAS_main_{timestamp_str}.txt"
 
-with open(output_filename, 'w') as f:
+with open(output_filename, "w") as f:
     # ===== Configuration Summary =====
-    f.write("="*60 + "\n")
+    f.write("=" * 60 + "\n")
     f.write("EXPERIMENT CONFIGURATION\n")
-    f.write("="*60 + "\n")
-    
+    f.write("=" * 60 + "\n")
+
     # Model settings
     model_type = "ResNet-18" if use_resnet else "AlexNet"
     f.write(f"Model: {model_type}\n")
@@ -663,13 +855,15 @@ with open(output_filename, 'w') as f:
         f.write(f"  split_ratio: {split_ratio}\n")
     else:
         f.write(f"  split_alexnet: {split_alexnet}\n")
-    
+
     # Data settings
     f.write(f"\nData Settings:\n")
     f.write(f"  Dataset: {selectDataset}\n")
-    f.write(f"  IID: {iid}, Dirichlet: {dirichlet}, Label_Dirichlet: {label_dirichlet}\n")
+    f.write(
+        f"  IID: {iid}, Dirichlet: {dirichlet}, Label_Dirichlet: {label_dirichlet}\n"
+    )
     f.write(f"  Alpha: {alpha}, Shard: {shard}, Min_require_size: {min_require_size}\n")
-    
+
     # Training settings
     f.write(f"\nTraining Settings:\n")
     f.write(f"  Epochs: {epochs}, LocalEpoch: {localEpoch}\n")
@@ -677,46 +871,46 @@ with open(output_filename, 'w') as f:
     f.write(f"  BatchSize: {batchSize}, LR: {lr}\n")
     f.write(f"  Momentum: {momentum}, Weight_decay: {weight_decay}\n")
     f.write(f"  Clip_grad: {clip_grad}\n")
-    
+
     # GAS settings
     f.write(f"\nGAS Settings:\n")
     f.write(f"  Generate: {Generate}, Sample_Frequency: {Sample_Frequency}\n")
     f.write(f"  V_Test: {V_Test}, V_Test_Frequency: {V_Test_Frequency}\n")
-    f.write(f"  G_Measurement: {G_Measurement}, G_Measure_Frequency: {G_Measure_Frequency}\n")
+    f.write(
+        f"  G_Measurement: {G_Measurement}, G_Measure_Frequency: {G_Measure_Frequency}\n"
+    )
     f.write(f"  WRTT: {WRTT}\n")
-    
+
     # Other
     f.write(f"\nOther:\n")
     f.write(f"  Seed: {seed_value}\n")
     f.write(f"  Method: {selectMethod}\n")
-    f.write("="*60 + "\n\n")
-    
+    f.write("=" * 60 + "\n\n")
+
     # ===== Results =====
     f.write("RESULTS\n")
-    f.write("-"*60 + "\n")
-    
+    f.write("-" * 60 + "\n")
+
     if V_Test is True:
-        f.write(f'Test Frequency is {V_Test_Frequency}; \n')
-        f.write('Gradient Dissimilarity = [' + total_v_value_str + ']\n')
+        f.write(f"Test Frequency is {V_Test_Frequency}; \n")
+        f.write("Gradient Dissimilarity = [" + total_v_value_str + "]\n")
 
     if WRTT is True:
-        clients_computing_str = ', '.join(str(x) for x in clients_computing)
-        clients_position_str = ', '.join(str(x) for x in clients_position)
-        rates_str = ', '.join(str(x) for x in rates)
-        f.write('clients computing = [' + clients_computing_str + ']\n')
-        f.write('clients position = [' + clients_position_str + ']\n')
-        f.write('clients rates = [' + rates_str + ']\n')
-        f.write('time = [' + time_record_str + ']\n')
+        clients_computing_str = ", ".join(str(x) for x in clients_computing)
+        clients_position_str = ", ".join(str(x) for x in clients_position)
+        rates_str = ", ".join(str(x) for x in rates)
+        f.write("clients computing = [" + clients_computing_str + "]\n")
+        f.write("clients position = [" + clients_position_str + "]\n")
+        f.write("clients rates = [" + rates_str + "]\n")
+        f.write("time = [" + time_record_str + "]\n")
 
     if G_Measurement and g_manager is not None:
-        client_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['client_g'])
-        server_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['server_g'])
-        split_g_str = ', '.join(f"{x:.6f}" for x in g_manager.g_history['split_g'])
-        f.write(f'Client G = [{client_g_str}]\n')
-        f.write(f'Server G = [{server_g_str}]\n')
-        f.write(f'Split G = [{split_g_str}]\n')
+        client_g_str = ", ".join(f"{x:.6f}" for x in g_manager.g_history["client_g"])
+        server_g_str = ", ".join(f"{x:.6f}" for x in g_manager.g_history["server_g"])
+        split_g_str = ", ".join(f"{x:.6f}" for x in g_manager.g_history["split_g"])
+        f.write(f"Client G = [{client_g_str}]\n")
+        f.write(f"Server G = [{server_g_str}]\n")
+        f.write(f"Split G = [{split_g_str}]\n")
 
-    f.write(f'{begin_time_str} ~ {end_time_str};\n')
-    f.write('GAS = [' + total_accuracy_str + ']\n')
-
-
+    f.write(f"{begin_time_str} ~ {end_time_str};\n")
+    f.write("GAS = [" + total_accuracy_str + "]\n")

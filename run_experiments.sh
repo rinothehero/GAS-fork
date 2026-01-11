@@ -22,9 +22,15 @@ echo ""
 
 # 실험 설정 정의 (예시)
 declare -a experiments=(
-    "exp1:use_resnet=False,split_alexnet='default',epochs=300,shard=8,alpha=0.9"
-    "exp2:use_resnet=False,split_alexnet='light',epochs=300,shard=8,alpha=0.9"
-    "exp3:use_resnet=False,split_alexnet='light',epochs=300,shard=2,alpha=0.3"
+    "exp0:use_resnet=True,split_layer='layer1.1.bn2',epochs=300,shard=8,alpha=0.9,cifar=True,fmnist=False"
+    "exp1:use_resnet=True,split_layer = "layer1.1.bn2",epochs=300,shard=2,alpha=0.3,cifar=True,fmnist=False"
+    "exp2:use_resnet=True,split_layer = "layer1.0.bn1",epochs=300,shard=8,alpha=0.9,cifar=True,fmnist=False"
+    "exp3:use_resnet=True,split_layer = "layer1.0.bn1",epochs=300,shard=2,alpha=0.3,cifar=True,fmnist=False"
+
+    "exp4:use_resnet=False,split_alexnet='default',epochs=300,shard=8,alpha=0.9,cifar=False,fmnist=True"
+    "exp4:use_resnet=False,split_alexnet='default',epochs=300,shard=2,alpha=0.3,cifar=False,fmnist=True"
+    "exp5:use_resnet=False,split_alexnet='light',epochs=300,shard=8,alpha=0.9,cifar=False,fmnist=True"
+    "exp6:use_resnet=False,split_alexnet='light',epochs=300,shard=2,alpha=0.3,cifar=False,fmnist=True"
 )
 
 # 총 실험 개수
